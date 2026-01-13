@@ -1,0 +1,26 @@
+# Core Dependencies
+scylla-driver>=3.25.6,<3.29.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Ray Data
+ray[data]
+pyarrow
+
+# ML Libraries
+scikit-learn
+xgboost
+
+# Data Generation
+faker
+
+# Utilities
+tqdm
+python-dotenv
+pyyaml
+
+# Web/API (for inference server)
+fastapi
+uvicorn
+pydantic
+
