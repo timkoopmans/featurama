@@ -1,0 +1,2 @@
+"""ScyllaDB integration module."""
+
