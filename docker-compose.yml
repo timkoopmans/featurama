@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  scylla:
+    image: scylladb/scylla
+    container_name: featurama-scylla
+    command: --smp 1 --memory 2G --overprovisioned 1 --api-address 0.0.0.0
+    ports:
+      - "9042:9042"  # CQL native transport
+      - "9180:9180"  # Prometheus API
+      - "10000:10000" # REST API
+    volumes:
+      - scylla-data:/var/lib/scylla
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - featurama-network
+
+volumes:
+  scylla-data:
+
+networks:
+  featurama-network:
+    driver: bridge
+
