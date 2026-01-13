@@ -1,0 +1,53 @@
+# Python
+.DS_Store
+# Mac
+
+*.log
+*.parquet
+*.csv
+data/
+# Data
+
+htmlcov/
+.coverage
+.pytest_cache/
+# Testing
+
+*.ipynb
+.ipynb_checkpoints/
+# Jupyter
+
+*.swo
+*.swp
+*.iml
+.vscode/
+.idea/
+# IDE
+
+env/
+ENV/
+venv/
+.venv/
+# Virtual Environment
+
+*.egg
+.installed.cfg
+*.egg-info/
+wheels/
+var/
+sdist/
+parts/
+lib64/
+lib/
+.eggs/
+eggs/
+downloads/
+dist/
+develop-eggs/
+build/
+.Python
+*.so
+*$py.class
+*.py[cod]
+__pycache__/
+
