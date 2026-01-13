@@ -93,16 +93,14 @@ class FeatureStore:
         now = datetime.now()
         tags = tags or {}
 
-        query = f"""
+        query_str = f"""
             INSERT INTO {self.keyspace}.feature_metadata
             (feature_name, version, feature_type, description, created_at, updated_at, tags)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """
 
-        self.client.execute(
-            query,
-            (feature_name, version, feature_type, description, now, now, tags)
-        )
+        prepared = self.client.session.prepare(query_str)
+        self.client.session.execute(prepared, (feature_name, version, feature_type, description, now, now, tags))
 
         logger.info(f"Registered feature: {feature_name} v{version} ({feature_type})")
 
@@ -128,20 +126,22 @@ class FeatureStore:
         metadata = metadata or {}
 
         # Insert into entity registry
-        query1 = f"""
+        query1_str = f"""
             INSERT INTO {self.keyspace}.entity_registry
             (entity_id, entity_type, name, metadata, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
         """
-        self.client.execute(query1, (entity_id, entity_type, name, metadata, now, now))
+        prepared1 = self.client.session.prepare(query1_str)
+        self.client.session.execute(prepared1, (entity_id, entity_type, name, metadata, now, now))
 
         # Insert into entity_by_type index
-        query2 = f"""
+        query2_str = f"""
             INSERT INTO {self.keyspace}.entity_by_type
             (entity_type, entity_id, name, created_at)
             VALUES (?, ?, ?, ?)
         """
-        self.client.execute(query2, (entity_type, entity_id, name, now))
+        prepared2 = self.client.session.prepare(query2_str)
+        self.client.session.execute(prepared2, (entity_type, entity_id, name, now))
 
         logger.debug(f"Registered entity: {entity_id} ({entity_type})")
 
@@ -173,19 +173,23 @@ class FeatureStore:
         logger.info(f"Writing {len(features_df)} feature values...")
 
         # Prepare batched inserts
-        from cassandra.query import BatchStatement, SimpleStatement
+        from cassandra.query import BatchStatement
 
-        insert_query = SimpleStatement(f"""
+        insert_query_str = f"""
             INSERT INTO {self.keyspace}.feature_values
             (entity_id, feature_name, timestamp, value_double, value_text, value_int, value_bool, version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """)
+        """
 
-        insert_query_by_name = SimpleStatement(f"""
+        insert_query_by_name_str = f"""
             INSERT INTO {self.keyspace}.feature_values_by_name
             (feature_name, entity_id, timestamp, value_double, value_text, value_int, value_bool, version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """)
+        """
+
+        # Prepare statements once
+        insert_stmt = self.client.session.prepare(insert_query_str)
+        insert_stmt_by_name = self.client.session.prepare(insert_query_by_name_str)
 
         batch = BatchStatement()
         count = 0
@@ -196,17 +200,28 @@ class FeatureStore:
             timestamp = row['timestamp']
             value = row['value']
 
-            # Type-based value columns
-            value_double = float(value) if isinstance(value, (int, float)) else None
-            value_text = str(value) if isinstance(value, str) else None
-            value_int = int(value) if isinstance(value, int) else None
-            value_bool = bool(value) if isinstance(value, bool) else None
+            # Type-based value columns - check bool first since bool is subclass of int
+            value_double = None
+            value_text = None
+            value_int = None
+            value_bool = None
+
+            if isinstance(value, bool):
+                value_bool = value
+            elif isinstance(value, int):
+                value_int = value
+            elif isinstance(value, float):
+                value_double = value
+            elif isinstance(value, str):
+                value_text = value
+            else:
+                value_text = str(value)
 
             params = (entity_id, feature_name, timestamp, value_double, value_text, value_int, value_bool, version)
             params_by_name = (feature_name, entity_id, timestamp, value_double, value_text, value_int, value_bool, version)
 
-            batch.add(insert_query, params)
-            batch.add(insert_query_by_name, params_by_name)
+            batch.add(insert_stmt, params)
+            batch.add(insert_stmt_by_name, params_by_name)
 
             count += 1
 
@@ -240,7 +255,7 @@ class FeatureStore:
 
         results = []
 
-        query = f"""
+        query_str = f"""
             SELECT entity_id, feature_name, timestamp, 
                    value_double, value_text, value_int, value_bool
             FROM {self.keyspace}.feature_values
@@ -248,9 +263,12 @@ class FeatureStore:
             LIMIT 1
         """
 
+        # Prepare the statement
+        prepared = self.client.session.prepare(query_str)
+
         for entity_id in entity_ids:
             for feature_name in feature_names:
-                result = self.client.execute(query, (entity_id, feature_name))
+                result = self.client.session.execute(prepared, (entity_id, feature_name))
                 row = result.one()
 
                 if row:
@@ -285,7 +303,7 @@ class FeatureStore:
 
         results = []
 
-        query = f"""
+        query_str = f"""
             SELECT entity_id, feature_name, timestamp,
                    value_double, value_text, value_int, value_bool
             FROM {self.keyspace}.feature_values
@@ -293,9 +311,11 @@ class FeatureStore:
             LIMIT 1
         """
 
+        prepared = self.client.session.prepare(query_str)
+
         for entity_id in entity_ids:
             for feature_name in feature_names:
-                result = self.client.execute(query, (entity_id, feature_name, timestamp))
+                result = self.client.session.execute(prepared, (entity_id, feature_name, timestamp))
                 row = result.one()
 
                 if row:
@@ -333,22 +353,24 @@ class FeatureStore:
         self.connect()
 
         if start_time and end_time:
-            query = f"""
+            query_str = f"""
                 SELECT timestamp, value_double, value_text, value_int, value_bool
                 FROM {self.keyspace}.feature_values
                 WHERE entity_id = ? AND feature_name = ?
                   AND timestamp >= ? AND timestamp <= ?
                 LIMIT ?
             """
-            result = self.client.execute(query, (entity_id, feature_name, start_time, end_time, limit))
+            prepared = self.client.session.prepare(query_str)
+            result = self.client.session.execute(prepared, (entity_id, feature_name, start_time, end_time, limit))
         else:
-            query = f"""
+            query_str = f"""
                 SELECT timestamp, value_double, value_text, value_int, value_bool
                 FROM {self.keyspace}.feature_values
                 WHERE entity_id = ? AND feature_name = ?
                 LIMIT ?
             """
-            result = self.client.execute(query, (entity_id, feature_name, limit))
+            prepared = self.client.session.prepare(query_str)
+            result = self.client.session.execute(prepared, (entity_id, feature_name, limit))
 
         data = []
         for row in result:
@@ -387,12 +409,13 @@ class FeatureStore:
         self.connect()
 
         if entity_type:
-            query = f"""
+            query_str = f"""
                 SELECT entity_type, entity_id, name, created_at
                 FROM {self.keyspace}.entity_by_type
                 WHERE entity_type = ?
             """
-            result = self.client.execute(query, (entity_type,))
+            prepared = self.client.session.prepare(query_str)
+            result = self.client.session.execute(prepared, (entity_type,))
         else:
             query = f"SELECT * FROM {self.keyspace}.entity_registry"
             result = self.client.execute(query)
