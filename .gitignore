@@ -50,4 +50,4 @@ build/
 *$py.class
 *.py[cod]
 __pycache__/
-
+.idea/
