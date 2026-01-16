@@ -5,15 +5,19 @@ FastAPI server for real-time delivery time predictions using the feature store.
 """
 
 import logging
-from typing import Dict, List, Optional
+import os
 from datetime import datetime
+from typing import Dict, List, Optional
 
+import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-import uvicorn
 
 from featurama.core.feature_store import FeatureStore
 from featurama.ml.training import DeliveryTimePredictor
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Featurama Inference API",
     description="Real-time delivery time predictions using ScyllaDB-backed feature store",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Global instances
@@ -31,8 +35,13 @@ predictor: Optional[DeliveryTimePredictor] = None
 
 class PredictionRequest(BaseModel):
     """Request model for predictions."""
-    delivery_id: Optional[str] = Field(None, description="Delivery ID for feature lookup")
-    features: Optional[Dict[str, float]] = Field(None, description="Manual feature values")
+
+    delivery_id: Optional[str] = Field(
+        None, description="Delivery ID for feature lookup"
+    )
+    features: Optional[Dict[str, float]] = Field(
+        None, description="Manual feature values"
+    )
 
     class Config:
         json_schema_extra = {
@@ -43,7 +52,7 @@ class PredictionRequest(BaseModel):
                     "hazard_level": 0.3,
                     "estimated_duration": 10.5,
                     "traffic_level": 0.7,
-                    "weather_index": 0.8
+                    "weather_index": 0.8,
                 }
             }
         }
@@ -51,7 +60,10 @@ class PredictionRequest(BaseModel):
 
 class PredictionResponse(BaseModel):
     """Response model for predictions."""
-    predicted_duration: float = Field(..., description="Predicted delivery time in hours")
+
+    predicted_duration: float = Field(
+        ..., description="Predicted delivery time in hours"
+    )
     delivery_id: Optional[str] = None
     features_used: Dict[str, float]
     timestamp: datetime
@@ -59,6 +71,7 @@ class PredictionResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
+
     status: str
     feature_store_connected: bool
     model_loaded: bool
@@ -72,8 +85,19 @@ async def startup_event():
 
     logger.info("Starting Featurama Inference Server...")
 
+    # Read config from env or use defaults
+    contact_points = os.getenv("SCYLLA_CONTACT_POINTS", "127.0.0.1").split(",")
+    username = os.getenv("SCYLLA_USERNAME")
+    password = os.getenv("SCYLLA_PASSWORD")
+    datacenter = os.getenv("SCYLLA_DATACENTER")
+
     # Initialize feature store
-    feature_store = FeatureStore()
+    feature_store = FeatureStore(
+        contact_points=contact_points,
+        username=username,
+        password=password,
+        datacenter=datacenter,
+    )
     try:
         feature_store.connect()
         logger.info("Feature store connected")
@@ -110,7 +134,7 @@ async def health_check():
         status="healthy" if (feature_store and predictor) else "degraded",
         feature_store_connected=feature_store is not None and feature_store._connected,
         model_loaded=predictor is not None and predictor.model is not None,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     )
 
 
@@ -137,19 +161,18 @@ async def predict_delivery_time(request: PredictionRequest):
             # Fetch latest features for the delivery
             feature_names = predictor.feature_names
             feature_df = feature_store.get_online_features(
-                entity_ids=[request.delivery_id],
-                feature_names=feature_names
+                entity_ids=[request.delivery_id], feature_names=feature_names
             )
 
             if feature_df.empty:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"No features found for delivery_id: {request.delivery_id}"
+                    detail=f"No features found for delivery_id: {request.delivery_id}",
                 )
 
             # Convert to dict
             for _, row in feature_df.iterrows():
-                features[row['feature_name']] = row['value']
+                features[row["feature_name"]] = row["value"]
 
         except Exception as e:
             logger.error(f"Error fetching features: {e}")
@@ -160,16 +183,14 @@ async def predict_delivery_time(request: PredictionRequest):
         features = request.features
     else:
         raise HTTPException(
-            status_code=400,
-            detail="Must provide either delivery_id or features"
+            status_code=400, detail="Must provide either delivery_id or features"
         )
 
     # Validate required features
     missing_features = [f for f in predictor.feature_names if f not in features]
     if missing_features:
         raise HTTPException(
-            status_code=400,
-            detail=f"Missing required features: {missing_features}"
+            status_code=400, detail=f"Missing required features: {missing_features}"
         )
 
     # Make prediction
@@ -180,7 +201,7 @@ async def predict_delivery_time(request: PredictionRequest):
             predicted_duration=prediction,
             delivery_id=request.delivery_id,
             features_used=features,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
     except Exception as e:
         logger.error(f"Prediction error: {e}")
@@ -202,32 +223,30 @@ async def get_entity_features(entity_id: str, feature_names: Optional[str] = Non
     try:
         # Parse feature names
         if feature_names:
-            feature_list = [f.strip() for f in feature_names.split(',')]
+            feature_list = [f.strip() for f in feature_names.split(",")]
         else:
             feature_list = predictor.feature_names if predictor else None
 
         if not feature_list:
             raise HTTPException(
                 status_code=400,
-                detail="Must provide feature_names or have model loaded"
+                detail="Must provide feature_names or have model loaded",
             )
 
         # Fetch features
         feature_df = feature_store.get_online_features(
-            entity_ids=[entity_id],
-            feature_names=feature_list
+            entity_ids=[entity_id], feature_names=feature_list
         )
 
         if feature_df.empty:
             raise HTTPException(
-                status_code=404,
-                detail=f"No features found for entity_id: {entity_id}"
+                status_code=404, detail=f"No features found for entity_id: {entity_id}"
             )
 
         return {
             "entity_id": entity_id,
-            "features": feature_df.to_dict('records'),
-            "timestamp": datetime.now()
+            "features": feature_df.to_dict("records"),
+            "timestamp": datetime.now(),
         }
 
     except HTTPException:
@@ -257,44 +276,42 @@ async def batch_predict(entity_ids: List[str]):
         try:
             # Fetch features
             feature_df = feature_store.get_online_features(
-                entity_ids=[entity_id],
-                feature_names=predictor.feature_names
+                entity_ids=[entity_id], feature_names=predictor.feature_names
             )
 
             if feature_df.empty:
-                predictions.append({
-                    "entity_id": entity_id,
-                    "status": "error",
-                    "message": "No features found"
-                })
+                predictions.append(
+                    {
+                        "entity_id": entity_id,
+                        "status": "error",
+                        "message": "No features found",
+                    }
+                )
                 continue
 
             # Convert to dict
             features = {}
             for _, row in feature_df.iterrows():
-                features[row['feature_name']] = row['value']
+                features[row["feature_name"]] = row["value"]
 
             # Predict
             prediction = predictor.predict_delivery_time(features)
 
-            predictions.append({
-                "entity_id": entity_id,
-                "status": "success",
-                "predicted_duration": prediction,
-                "features": features
-            })
+            predictions.append(
+                {
+                    "entity_id": entity_id,
+                    "status": "success",
+                    "predicted_duration": prediction,
+                    "features": features,
+                }
+            )
 
         except Exception as e:
-            predictions.append({
-                "entity_id": entity_id,
-                "status": "error",
-                "message": str(e)
-            })
+            predictions.append(
+                {"entity_id": entity_id, "status": "error", "message": str(e)}
+            )
 
-    return {
-        "predictions": predictions,
-        "timestamp": datetime.now()
-    }
+    return {"predictions": predictions, "timestamp": datetime.now()}
 
 
 def start_server(host: str = "0.0.0.0", port: int = 8000):
@@ -311,4 +328,3 @@ def start_server(host: str = "0.0.0.0", port: int = 8000):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     start_server()
-

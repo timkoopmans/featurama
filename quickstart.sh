@@ -75,4 +75,3 @@ echo ""
 echo "  4. Explore the API docs at:"
 echo "     http://localhost:8000/docs"
 echo ""
-
