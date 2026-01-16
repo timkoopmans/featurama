@@ -11,9 +11,11 @@ from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
 from cassandra.policies import DCAwareRoundRobinPolicy, TokenAwarePolicy
 from cassandra.query import dict_factory
+from dotenv import load_dotenv
 
 from featurama.scylla.schema import KEYSPACE_NAME, get_schema_statements
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 
@@ -37,12 +39,14 @@ class ScyllaClient:
             port: CQL port (default 9042)
             keyspace: Keyspace name
         """
-        self.contact_points = contact_points or ["127.0.0.1"]
+        self.contact_points = contact_points or os.getenv(
+            "SCYLLA_CONTACT_POINTS", "127.0.0.1"
+        ).split(",")
         self.port = port
         self.keyspace = keyspace
-        self.username = username
-        self.password = password
-        self.datacenter = datacenter
+        self.username = username or os.getenv("SCYLLA_USERNAME")
+        self.password = password or os.getenv("SCYLLA_PASSWORD")
+        self.datacenter = datacenter or os.getenv("SCYLLA_DATACENTER")
         self.cluster = None
         self.session = None
 
