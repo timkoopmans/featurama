@@ -24,3 +24,5 @@ fastapi
 uvicorn
 pydantic
 
+# Environment Variables
+python-dotenv

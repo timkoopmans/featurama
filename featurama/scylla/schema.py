@@ -9,14 +9,6 @@ Optimized schema design for high-cardinality feature storage:
 
 KEYSPACE_NAME = "featurama"
 
-CREATE_KEYSPACE = f"""
-    CREATE KEYSPACE IF NOT EXISTS {KEYSPACE_NAME}
-    WITH replication = {{
-        'class': 'SimpleStrategy',
-        'replication_factor': 1
-    }}
-"""
-
 # Feature metadata table - stores feature definitions
 CREATE_FEATURE_METADATA_TABLE = f"""
     CREATE TABLE IF NOT EXISTS {KEYSPACE_NAME}.feature_metadata (
@@ -46,8 +38,8 @@ CREATE_FEATURE_VALUES_TABLE = f"""
         version INT,
         PRIMARY KEY ((entity_id), feature_name, timestamp)
     ) WITH CLUSTERING ORDER BY (feature_name ASC, timestamp DESC)
-    AND compaction = {{'class': 'TimeWindowCompactionStrategy'}}
-    AND default_time_to_live = 0
+    AND compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '2', 'compaction_window_unit': 'DAYS'}}
+    AND default_time_to_live = 2592000
 """
 
 # Feature values by feature name - for batch queries across entities
@@ -63,7 +55,8 @@ CREATE_FEATURE_VALUES_BY_NAME_TABLE = f"""
         version INT,
         PRIMARY KEY ((feature_name), entity_id, timestamp)
     ) WITH CLUSTERING ORDER BY (entity_id ASC, timestamp DESC)
-    AND compaction = {{'class': 'TimeWindowCompactionStrategy'}}
+    AND compaction = {{'class': 'TimeWindowCompactionStrategy', 'compaction_window_size': '2', 'compaction_window_unit': 'DAYS'}}
+    AND default_time_to_live = 2592000
 """
 
 # Entity registry - catalog of all entities
@@ -99,7 +92,13 @@ ALL_TABLES = [
 ]
 
 
-def get_schema_statements():
+def get_schema_statements(replication_factor):
     """Get all schema creation statements."""
+    CREATE_KEYSPACE = f"""
+        CREATE KEYSPACE IF NOT EXISTS {KEYSPACE_NAME}
+        WITH replication = {{
+            'class': 'NetworkTopologyStrategy',
+            'replication_factor': {replication_factor}
+        }}
+    """
     return [CREATE_KEYSPACE] + ALL_TABLES
-

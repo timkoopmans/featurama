@@ -4,14 +4,19 @@ ScyllaDB client for Featurama.
 Handles connection management and query execution.
 """
 
-from cassandra.cluster import Cluster, ExecutionProfile, EXEC_PROFILE_DEFAULT
+import logging
+import os
+from typing import Any, Dict, List, Optional
+
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
 from cassandra.policies import DCAwareRoundRobinPolicy, TokenAwarePolicy
 from cassandra.query import dict_factory
-from typing import List, Dict, Any, Optional
-import logging
+from dotenv import load_dotenv
 
 from featurama.scylla.schema import KEYSPACE_NAME, get_schema_statements
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 
@@ -22,7 +27,10 @@ class ScyllaClient:
         self,
         contact_points: List[str] = None,
         port: int = 9042,
-        keyspace: str = KEYSPACE_NAME
+        keyspace: str = KEYSPACE_NAME,
+        username: str = None,
+        password: str = None,
+        datacenter: str = None,
     ):
         """
         Initialize ScyllaDB client.
@@ -32,9 +40,14 @@ class ScyllaClient:
             port: CQL port (default 9042)
             keyspace: Keyspace name
         """
-        self.contact_points = contact_points or ["127.0.0.1"]
+        self.contact_points = contact_points or os.getenv(
+            "SCYLLA_CONTACT_POINTS", "127.0.0.1"
+        ).split(",")
         self.port = port
         self.keyspace = keyspace
+        self.username = username or os.getenv("SCYLLA_USERNAME")
+        self.password = password or os.getenv("SCYLLA_PASSWORD")
+        self.datacenter = datacenter or os.getenv("SCYLLA_DATACENTER")
         self.cluster = None
         self.session = None
 
@@ -48,15 +61,25 @@ class ScyllaClient:
 
         # Create execution profile for better performance
         profile = ExecutionProfile(
-            load_balancing_policy=TokenAwarePolicy(DCAwareRoundRobinPolicy()),
-            row_factory=dict_factory
+            load_balancing_policy=TokenAwarePolicy(
+                DCAwareRoundRobinPolicy(local_dc=self.datacenter)
+            ),
+            row_factory=dict_factory,
         )
+
+        # Setup authentication if credentials are provided
+        auth_provider = None
+        if self.username and self.password:
+            auth_provider = PlainTextAuthProvider(
+                username=self.username, password=self.password
+            )
 
         self.cluster = Cluster(
             contact_points=self.contact_points,
             port=self.port,
             execution_profiles={EXEC_PROFILE_DEFAULT: profile},
-            protocol_version=4
+            protocol_version=4,
+            auth_provider=auth_provider,
         )
 
         self.session = self.cluster.connect()
@@ -124,11 +147,11 @@ class ScyllaClient:
             logger.error(f"Batch execution failed: {e}")
             raise
 
-    def initialize_schema(self):
+    def initialize_schema(self, replication_factor):
         """Create keyspace and tables."""
         logger.info("Initializing Featurama schema...")
 
-        statements = get_schema_statements()
+        statements = get_schema_statements(replication_factor)
         for statement in statements:
             logger.info(f"Executing: {statement[:100]}...")
             self.execute(statement)
@@ -144,7 +167,7 @@ class ScyllaClient:
             "feature_values",
             "feature_values_by_name",
             "entity_registry",
-            "entity_by_type"
+            "entity_by_type",
         ]
 
         for table in tables:
@@ -163,8 +186,7 @@ class ScyllaClient:
         """
         try:
             result = self.execute(f"SELECT COUNT(*) FROM {self.keyspace}.{table_name}")
-            return result.one()['count']
+            return result.one()["count"]
         except Exception as e:
             logger.error(f"Failed to count rows in {table_name}: {e}")
             return -1
-

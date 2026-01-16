@@ -5,11 +5,13 @@ Provides high-level API for feature management, registration,
 writing, and retrieval from ScyllaDB.
 """
 
-import pandas as pd
-import numpy as np
-from datetime import datetime
-from typing import List, Dict, Any, Optional, Union
 import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
+
+import numpy as np
+import pandas as pd
+from cassandra.concurrent import execute_concurrent
 
 from featurama.scylla.client import ScyllaClient
 from featurama.scylla.schema import KEYSPACE_NAME
@@ -33,7 +35,10 @@ class FeatureStore:
         self,
         contact_points: List[str] = None,
         port: int = 9042,
-        keyspace: str = KEYSPACE_NAME
+        keyspace: str = KEYSPACE_NAME,
+        username: str = None,
+        password: str = None,
+        datacenter: str = None,
     ):
         """
         Initialize Feature Store.
@@ -43,9 +48,125 @@ class FeatureStore:
             port: CQL port
             keyspace: Keyspace name
         """
-        self.client = ScyllaClient(contact_points, port, keyspace)
+        self.client = ScyllaClient(
+            contact_points, port, keyspace, username, password, datacenter
+        )
         self.keyspace = keyspace
         self._connected = False
+        self.prepared = {}
+
+    def _prepare_statements(self):
+        """Centralize all CQL preparations here."""
+
+        # Register New Feature
+        register_cql = f"""
+            INSERT INTO {self.keyspace}.feature_metadata
+            (feature_name, version, feature_type, description, created_at, updated_at, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        self.prepared["register_feature_query"] = self.client.session.prepare(
+            register_cql
+        )
+
+        # Register new Entitiy
+        register_new_entity = f"""
+            INSERT INTO {self.keyspace}.entity_registry
+            (entity_id, entity_type, name, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        self.prepared["register_entity_query"] = self.client.session.prepare(
+            register_new_entity
+        )
+
+        # Register new Entity Type Index
+        register_new_entity_index = f"""
+            INSERT INTO {self.keyspace}.entity_by_type
+            (entity_type, entity_id, name, created_at)
+            VALUES (?, ?, ?, ?)
+        """
+        self.prepared["register_entity_index_query"] = self.client.session.prepare(
+            register_new_entity_index
+        )
+
+        insert_features_query_str = f"""
+            INSERT INTO {self.keyspace}.feature_values
+            (entity_id, feature_name, timestamp, value_double, value_text, value_int, value_bool, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        self.prepared["insert_features_query"] = self.client.session.prepare(
+            insert_features_query_str
+        )
+
+        insert_features_query_by_name_str = f"""
+            INSERT INTO {self.keyspace}.feature_values_by_name
+            (feature_name, entity_id, timestamp, value_double, value_text, value_int, value_bool, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        self.prepared["insert_features_query_by_name"] = self.client.session.prepare(
+            insert_features_query_by_name_str
+        )
+
+        get_online_features_query_str = f"""
+            SELECT entity_id, feature_name, timestamp,
+                   value_double, value_text, value_int, value_bool
+            FROM {self.keyspace}.feature_values
+            WHERE entity_id = ? AND feature_name = ?
+            LIMIT 1
+        """
+        self.prepared["get_online_features_query"] = self.client.session.prepare(
+            get_online_features_query_str
+        )
+
+        get_historical_features_query_str = f"""
+            SELECT entity_id, feature_name, timestamp,
+                   value_double, value_text, value_int, value_bool
+            FROM {self.keyspace}.feature_values
+            WHERE entity_id = ? AND feature_name = ? AND timestamp <= ?
+            LIMIT 1
+        """
+        self.prepared["get_historical_features_query"] = self.client.session.prepare(
+            get_historical_features_query_str
+        )
+
+        get_feature_history_timeframe_query_str = f"""
+            SELECT timestamp, value_double, value_text, value_int, value_bool
+            FROM {self.keyspace}.feature_values
+            WHERE entity_id = ? AND feature_name = ?
+              AND timestamp >= ? AND timestamp <= ?
+            LIMIT ?
+        """
+        self.prepared["get_feature_history_timeframe_query"] = (
+            self.client.session.prepare(get_feature_history_timeframe_query_str)
+        )
+
+        get_feature_history_all_query_str = f"""
+            SELECT timestamp, value_double, value_text, value_int, value_bool
+            FROM {self.keyspace}.feature_values
+            WHERE entity_id = ? AND feature_name = ?
+            LIMIT ?
+        """
+        self.prepared["get_feature_history_all_query"] = self.client.session.prepare(
+            get_feature_history_all_query_str
+        )
+
+        list_features_query_str = f"SELECT * FROM {self.keyspace}.feature_metadata"
+        self.prepared["list_features_query"] = self.client.session.prepare(
+            list_features_query_str
+        )
+
+        list_entries_by_entity_type_query_str = f"""
+                        SELECT entity_type, entity_id, name, created_at
+                        FROM {self.keyspace}.entity_by_type
+                        WHERE entity_type = ?
+                    """
+        self.prepared["list_entries_by_entity_type_query"] = (
+            self.client.session.prepare(list_entries_by_entity_type_query_str)
+        )
+
+        list_entries_all_query_str = f"SELECT * FROM {self.keyspace}.entity_registry"
+        self.prepared["list_entries_all_query"] = self.client.session.prepare(
+            list_entries_all_query_str
+        )
 
     def connect(self):
         """Connect to ScyllaDB."""
@@ -54,6 +175,7 @@ class FeatureStore:
             self.client.session.set_keyspace(self.keyspace)
             self._connected = True
             logger.info("Feature Store connected")
+            self._prepare_statements()
 
     def disconnect(self):
         """Disconnect from ScyllaDB."""
@@ -76,7 +198,7 @@ class FeatureStore:
         feature_type: str,
         description: str = "",
         version: int = 1,
-        tags: Dict[str, str] = None
+        tags: Dict[str, str] = None,
     ):
         """
         Register a new feature or feature version.
@@ -93,14 +215,10 @@ class FeatureStore:
         now = datetime.now()
         tags = tags or {}
 
-        query_str = f"""
-            INSERT INTO {self.keyspace}.feature_metadata
-            (feature_name, version, feature_type, description, created_at, updated_at, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """
-
-        prepared = self.client.session.prepare(query_str)
-        self.client.session.execute(prepared, (feature_name, version, feature_type, description, now, now, tags))
+        self.client.session.execute(
+            self.prepared["register_feature_query"],
+            (feature_name, version, feature_type, description, now, now, tags),
+        )
 
         logger.info(f"Registered feature: {feature_name} v{version} ({feature_type})")
 
@@ -109,7 +227,7 @@ class FeatureStore:
         entity_id: str,
         entity_type: str,
         name: str,
-        metadata: Dict[str, str] = None
+        metadata: Dict[str, str] = None,
     ):
         """
         Register an entity in the catalog.
@@ -126,30 +244,21 @@ class FeatureStore:
         metadata = metadata or {}
 
         # Insert into entity registry
-        query1_str = f"""
-            INSERT INTO {self.keyspace}.entity_registry
-            (entity_id, entity_type, name, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """
-        prepared1 = self.client.session.prepare(query1_str)
-        self.client.session.execute(prepared1, (entity_id, entity_type, name, metadata, now, now))
+        self.client.session.execute(
+            self.prepared["register_entity_query"],
+            (entity_id, entity_type, name, metadata, now, now),
+        )
 
         # Insert into entity_by_type index
-        query2_str = f"""
-            INSERT INTO {self.keyspace}.entity_by_type
-            (entity_type, entity_id, name, created_at)
-            VALUES (?, ?, ?, ?)
-        """
-        prepared2 = self.client.session.prepare(query2_str)
-        self.client.session.execute(prepared2, (entity_type, entity_id, name, now))
+        self.client.session.execute(
+            self.prepared["register_entity_index_query"],
+            (entity_type, entity_id, name, now),
+        )
 
         logger.debug(f"Registered entity: {entity_id} ({entity_type})")
 
     def write_features(
-        self,
-        features_df: pd.DataFrame,
-        version: int = 1,
-        batch_size: int = 1000
+        self, features_df: pd.DataFrame, version: int = 1, batch_size: int = 1000
     ):
         """
         Write features to the feature store.
@@ -167,38 +276,22 @@ class FeatureStore:
         """
         self.connect()
 
-        if 'timestamp' not in features_df.columns:
-            features_df['timestamp'] = datetime.now()
+        if "timestamp" not in features_df.columns:
+            features_df["timestamp"] = datetime.now()
 
         logger.info(f"Writing {len(features_df)} feature values...")
 
         # Prepare batched inserts
         from cassandra.query import BatchStatement
 
-        insert_query_str = f"""
-            INSERT INTO {self.keyspace}.feature_values
-            (entity_id, feature_name, timestamp, value_double, value_text, value_int, value_bool, version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """
-
-        insert_query_by_name_str = f"""
-            INSERT INTO {self.keyspace}.feature_values_by_name
-            (feature_name, entity_id, timestamp, value_double, value_text, value_int, value_bool, version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """
-
-        # Prepare statements once
-        insert_stmt = self.client.session.prepare(insert_query_str)
-        insert_stmt_by_name = self.client.session.prepare(insert_query_by_name_str)
-
-        batch = BatchStatement()
-        count = 0
+        features_batch = BatchStatement()
+        features_by_name_batch = BatchStatement()
 
         for _, row in features_df.iterrows():
-            entity_id = row['entity_id']
-            feature_name = row['feature_name']
-            timestamp = row['timestamp']
-            value = row['value']
+            entity_id = row["entity_id"]
+            feature_name = row["feature_name"]
+            timestamp = row["timestamp"]
+            value = row["value"]
 
             # Type-based value columns - check bool first since bool is subclass of int
             value_double = None
@@ -217,29 +310,65 @@ class FeatureStore:
             else:
                 value_text = str(value)
 
-            params = (entity_id, feature_name, timestamp, value_double, value_text, value_int, value_bool, version)
-            params_by_name = (feature_name, entity_id, timestamp, value_double, value_text, value_int, value_bool, version)
+            params = (
+                entity_id,
+                feature_name,
+                timestamp,
+                value_double,
+                value_text,
+                value_int,
+                value_bool,
+                version,
+            )
+            params_by_name = (
+                feature_name,
+                entity_id,
+                timestamp,
+                value_double,
+                value_text,
+                value_int,
+                value_bool,
+                version,
+            )
 
-            batch.add(insert_stmt, params)
-            batch.add(insert_stmt_by_name, params_by_name)
+            features_batch.add(self.prepared["insert_features_query"], params)
+            features_by_name_batch.add(
+                self.prepared["insert_features_query_by_name"], params_by_name
+            )
 
-            count += 1
-
-            if count % batch_size == 0:
-                self.client.session.execute(batch)
-                batch = BatchStatement()
-                logger.info(f"Written {count} features...")
+            if (
+                len(features_batch) % batch_size == 0
+                and len(features_by_name_batch) % batch_size == 0
+            ):
+                execute_concurrent(
+                    self.client.session,
+                    [(features_batch, None), (features_by_name_batch, None)],
+                )
+                logger.info(
+                    f"Written {len(features_batch) + len(features_by_name_batch)} features..."
+                )
+                features_batch = BatchStatement()
+                features_by_name_batch = BatchStatement()
+            elif len(features_batch) % batch_size == 0:
+                self.client.session.execute(features_batch)
+                logger.info(f"Written {len(features_batch)} features...")
+                features_batch = BatchStatement()
+            elif len(features_by_name_batch) % batch_size == 0:
+                self.client.session.execute(features_by_name_batch)
+                logger.info(f"Written {len(features_by_name_batch)} features...")
+                features_by_name_batch = BatchStatement()
 
         # Execute remaining batch
-        if count % batch_size != 0:
-            self.client.session.execute(batch)
+        if len(features_batch) % batch_size != 0:
+            self.client.session.execute(features_batch)
 
-        logger.info(f"Successfully wrote {count} feature values")
+        if len(features_by_name_batch) % batch_size != 0:
+            self.client.session.execute(features_by_name_batch)
+
+        logger.info(f"Successfully wrote {len(features_df)} feature values")
 
     def get_online_features(
-        self,
-        entity_ids: List[str],
-        feature_names: List[str]
+        self, entity_ids: List[str], feature_names: List[str]
     ) -> pd.DataFrame:
         """
         Get latest feature values for entities (online serving).
@@ -255,38 +384,29 @@ class FeatureStore:
 
         results = []
 
-        query_str = f"""
-            SELECT entity_id, feature_name, timestamp, 
-                   value_double, value_text, value_int, value_bool
-            FROM {self.keyspace}.feature_values
-            WHERE entity_id = ? AND feature_name = ?
-            LIMIT 1
-        """
-
-        # Prepare the statement
-        prepared = self.client.session.prepare(query_str)
-
         for entity_id in entity_ids:
             for feature_name in feature_names:
-                result = self.client.session.execute(prepared, (entity_id, feature_name))
+                result = self.client.session.execute(
+                    self.prepared["get_online_features_query"],
+                    (entity_id, feature_name),
+                )
                 row = result.one()
 
                 if row:
                     value = self._extract_value(row)
-                    results.append({
-                        'entity_id': entity_id,
-                        'feature_name': feature_name,
-                        'value': value,
-                        'timestamp': row['timestamp']
-                    })
+                    results.append(
+                        {
+                            "entity_id": entity_id,
+                            "feature_name": feature_name,
+                            "value": value,
+                            "timestamp": row["timestamp"],
+                        }
+                    )
 
         return pd.DataFrame(results)
 
     def get_historical_features(
-        self,
-        entity_ids: List[str],
-        feature_names: List[str],
-        timestamp: datetime
+        self, entity_ids: List[str], feature_names: List[str], timestamp: datetime
     ) -> pd.DataFrame:
         """
         Get feature values at a specific point in time.
@@ -303,29 +423,24 @@ class FeatureStore:
 
         results = []
 
-        query_str = f"""
-            SELECT entity_id, feature_name, timestamp,
-                   value_double, value_text, value_int, value_bool
-            FROM {self.keyspace}.feature_values
-            WHERE entity_id = ? AND feature_name = ? AND timestamp <= ?
-            LIMIT 1
-        """
-
-        prepared = self.client.session.prepare(query_str)
-
         for entity_id in entity_ids:
             for feature_name in feature_names:
-                result = self.client.session.execute(prepared, (entity_id, feature_name, timestamp))
+                result = self.client.session.execute(
+                    self.prepared["get_historical_features_query"],
+                    (entity_id, feature_name, timestamp),
+                )
                 row = result.one()
 
                 if row:
                     value = self._extract_value(row)
-                    results.append({
-                        'entity_id': entity_id,
-                        'feature_name': feature_name,
-                        'value': value,
-                        'timestamp': row['timestamp']
-                    })
+                    results.append(
+                        {
+                            "entity_id": entity_id,
+                            "feature_name": feature_name,
+                            "value": value,
+                            "timestamp": row["timestamp"],
+                        }
+                    )
 
         return pd.DataFrame(results)
 
@@ -335,7 +450,7 @@ class FeatureStore:
         feature_name: str,
         start_time: datetime = None,
         end_time: datetime = None,
-        limit: int = 1000
+        limit: int = 1000,
     ) -> pd.DataFrame:
         """
         Get time-series history for a feature.
@@ -353,32 +468,20 @@ class FeatureStore:
         self.connect()
 
         if start_time and end_time:
-            query_str = f"""
-                SELECT timestamp, value_double, value_text, value_int, value_bool
-                FROM {self.keyspace}.feature_values
-                WHERE entity_id = ? AND feature_name = ?
-                  AND timestamp >= ? AND timestamp <= ?
-                LIMIT ?
-            """
-            prepared = self.client.session.prepare(query_str)
-            result = self.client.session.execute(prepared, (entity_id, feature_name, start_time, end_time, limit))
+            result = self.client.session.execute(
+                self.prepared["get_feature_history_timeframe_query"],
+                (entity_id, feature_name, start_time, end_time, limit),
+            )
         else:
-            query_str = f"""
-                SELECT timestamp, value_double, value_text, value_int, value_bool
-                FROM {self.keyspace}.feature_values
-                WHERE entity_id = ? AND feature_name = ?
-                LIMIT ?
-            """
-            prepared = self.client.session.prepare(query_str)
-            result = self.client.session.execute(prepared, (entity_id, feature_name, limit))
+            result = self.client.session.execute(
+                self.prepared["get_feature_history_all_query"],
+                (entity_id, feature_name, limit),
+            )
 
         data = []
         for row in result:
             value = self._extract_value(row)
-            data.append({
-                'timestamp': row['timestamp'],
-                'value': value
-            })
+            data.append({"timestamp": row["timestamp"], "value": value})
 
         return pd.DataFrame(data)
 
@@ -391,8 +494,7 @@ class FeatureStore:
         """
         self.connect()
 
-        query = f"SELECT * FROM {self.keyspace}.feature_metadata"
-        result = self.client.execute(query)
+        result = self.client.execute(self.prepared["list_features_query"])
 
         return pd.DataFrame(list(result))
 
@@ -409,28 +511,22 @@ class FeatureStore:
         self.connect()
 
         if entity_type:
-            query_str = f"""
-                SELECT entity_type, entity_id, name, created_at
-                FROM {self.keyspace}.entity_by_type
-                WHERE entity_type = ?
-            """
-            prepared = self.client.session.prepare(query_str)
-            result = self.client.session.execute(prepared, (entity_type,))
+            result = self.client.session.execute(
+                self.prepared["list_entries_by_entity_type_query"], (entity_type,)
+            )
         else:
-            query = f"SELECT * FROM {self.keyspace}.entity_registry"
-            result = self.client.execute(query)
+            result = self.client.execute(self.prepared["list_entries_all_query"])
 
         return pd.DataFrame(list(result))
 
     def _extract_value(self, row: Dict) -> Any:
         """Extract the non-null value from a row."""
-        if row['value_double'] is not None:
-            return row['value_double']
-        elif row['value_int'] is not None:
-            return row['value_int']
-        elif row['value_text'] is not None:
-            return row['value_text']
-        elif row['value_bool'] is not None:
-            return row['value_bool']
+        if row["value_double"] is not None:
+            return row["value_double"]
+        elif row["value_int"] is not None:
+            return row["value_int"]
+        elif row["value_text"] is not None:
+            return row["value_text"]
+        elif row["value_bool"] is not None:
+            return row["value_bool"]
         return None
-
