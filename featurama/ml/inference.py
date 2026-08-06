@@ -7,13 +7,17 @@ FastAPI server for real-time delivery time predictions using the feature store.
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime
+import os
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
+from dotenv import load_dotenv
 
 from featurama.core.feature_store import FeatureStore
 from featurama.ml.training import DeliveryTimePredictor
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +76,19 @@ async def startup_event():
 
     logger.info("Starting Featurama Inference Server...")
 
+    # Read config from env or use defaults
+    contact_points = os.getenv("SCYLLA_CONTACT_POINTS", "127.0.0.1").split(",")
+    username = os.getenv("SCYLLA_USERNAME")
+    password = os.getenv("SCYLLA_PASSWORD")
+    datacenter = os.getenv("SCYLLA_DATACENTER")
+
     # Initialize feature store
-    feature_store = FeatureStore()
+    feature_store = FeatureStore(
+        contact_points=contact_points,
+        username=username,
+        password=password,
+        datacenter=datacenter,
+    )
     try:
         feature_store.connect()
         logger.info("Feature store connected")

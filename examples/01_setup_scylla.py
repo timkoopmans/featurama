@@ -5,8 +5,12 @@ Initialize the Featurama keyspace and tables in ScyllaDB.
 """
 
 import logging
+import os
 import time
+from dotenv import load_dotenv
 from featurama.scylla.client import ScyllaClient
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,9 +34,12 @@ def main():
     print("⏳ Waiting for ScyllaDB to be ready...")
     time.sleep(2)
 
+    replication_factor = os.getenv("SCYLLA_REPLICATION_FACTOR", "1")
+    contact_points = os.getenv("SCYLLA_CONTACT_POINTS", "127.0.0.1").split(",")
+
     try:
         # Connect to ScyllaDB
-        client = ScyllaClient(contact_points=["127.0.0.1"], port=9042)
+        client = ScyllaClient(contact_points=contact_points, port=9042)
 
         print("📡 Connecting to ScyllaDB...")
         client.connect()
@@ -41,7 +48,7 @@ def main():
 
         # Initialize schema
         print("🏗️  Creating keyspace and tables...")
-        client.initialize_schema()
+        client.initialize_schema(replication_factor)
         print("✅ Schema initialized!")
         print()
 
