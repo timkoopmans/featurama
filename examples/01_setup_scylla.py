@@ -31,10 +31,10 @@ def main():
     time.sleep(2)
 
     try:
-        # Connect to ScyllaDB
-        client = ScyllaClient(contact_points=["127.0.0.1"], port=9042)
+        # Connect to ScyllaDB (settings come from the environment / .env)
+        client = ScyllaClient()
 
-        print("📡 Connecting to ScyllaDB...")
+        print(f"📡 Connecting to ScyllaDB at {', '.join(client.contact_points)}...")
         client.connect()
         print("✅ Connected successfully!")
         print()
@@ -56,7 +56,7 @@ def main():
         ]
 
         for table in tables:
-            query = f"SELECT * FROM featurama.{table} LIMIT 1"
+            query = f"SELECT * FROM {client.keyspace}.{table} LIMIT 1"
             try:
                 client.execute(query)
                 print(f"  ✅ {table}")

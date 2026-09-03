@@ -149,8 +149,10 @@ def main():
 
     # Verify ingestion
     print("🔍 Verifying ingestion...")
-    sample_entity = entities_df.iloc[0]['entity_id']
-    sample_feature = features_df.iloc[0]['feature_name']
+    # Sample both from the same row, so the entity actually owns the feature
+    sample_row = features_df.iloc[0]
+    sample_entity = sample_row['entity_id']
+    sample_feature = sample_row['feature_name']
 
     result = fs.get_online_features(
         entity_ids=[sample_entity],

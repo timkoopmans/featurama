@@ -9,13 +9,36 @@ Optimized schema design for high-cardinality feature storage:
 
 KEYSPACE_NAME = "featurama"
 
-CREATE_KEYSPACE = f"""
-    CREATE KEYSPACE IF NOT EXISTS {KEYSPACE_NAME}
-    WITH replication = {{
-        'class': 'SimpleStrategy',
-        'replication_factor': 1
-    }}
+def get_create_keyspace(
+    keyspace: str = KEYSPACE_NAME,
+    replication_factor: int = 1,
+    local_dc: str = None
+) -> str:
+    """
+    Build the CREATE KEYSPACE statement.
+
+    Uses NetworkTopologyStrategy when a datacenter is known (Scylla Cloud,
+    any multi-node deployment) and SimpleStrategy for a local single node.
+    """
+    if local_dc:
+        replication = (
+            f"'class': 'NetworkTopologyStrategy', "
+            f"'{local_dc}': {replication_factor}"
+        )
+    else:
+        replication = (
+            f"'class': 'SimpleStrategy', "
+            f"'replication_factor': {replication_factor}"
+        )
+
+    return f"""
+    CREATE KEYSPACE IF NOT EXISTS {keyspace}
+    WITH replication = {{{replication}}}
 """
+
+
+# Default statement for a local single-node cluster
+CREATE_KEYSPACE = get_create_keyspace()
 
 # Feature metadata table - stores feature definitions
 CREATE_FEATURE_METADATA_TABLE = f"""
@@ -99,7 +122,20 @@ ALL_TABLES = [
 ]
 
 
-def get_schema_statements():
-    """Get all schema creation statements."""
-    return [CREATE_KEYSPACE] + ALL_TABLES
+def get_schema_statements(
+    keyspace: str = KEYSPACE_NAME,
+    replication_factor: int = 1,
+    local_dc: str = None
+):
+    """
+    Get all schema creation statements.
+
+    Args:
+        keyspace: Target keyspace name
+        replication_factor: Replication factor for the keyspace
+        local_dc: Datacenter name; selects NetworkTopologyStrategy when set
+    """
+    create_keyspace = get_create_keyspace(keyspace, replication_factor, local_dc)
+    tables = [t.replace(KEYSPACE_NAME + ".", keyspace + ".") for t in ALL_TABLES]
+    return [create_keyspace] + tables
 

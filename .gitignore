@@ -51,3 +51,6 @@ build/
 *.py[cod]
 __pycache__/
 .idea/
+
+# Environment / secrets
+.env

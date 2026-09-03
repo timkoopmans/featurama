@@ -4,6 +4,7 @@ ScyllaDB client for Featurama.
 Handles connection management and query execution.
 """
 
+from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster, ExecutionProfile, EXEC_PROFILE_DEFAULT
 from cassandra.policies import DCAwareRoundRobinPolicy, TokenAwarePolicy
 from cassandra.query import dict_factory
@@ -21,20 +22,48 @@ class ScyllaClient:
     def __init__(
         self,
         contact_points: List[str] = None,
-        port: int = 9042,
-        keyspace: str = KEYSPACE_NAME
+        port: int = None,
+        keyspace: str = None,
+        username: str = None,
+        password: str = None,
+        local_dc: str = None,
+        replication_factor: int = None,
+        ssl: bool = None,
+        config: "ScyllaConfig" = None
     ):
         """
         Initialize ScyllaDB client.
+
+        Any argument left as None falls back to the environment-derived
+        config (see featurama.config), so a local docker cluster needs no
+        arguments and Scylla Cloud only needs a .env file.
 
         Args:
             contact_points: List of ScyllaDB node addresses
             port: CQL port (default 9042)
             keyspace: Keyspace name
+            username: CQL username (required by Scylla Cloud)
+            password: CQL password
+            local_dc: Datacenter name for DC-aware routing
+            replication_factor: Replication factor used when creating the keyspace
+            ssl: Enable TLS for the CQL connection
+            config: Pre-built ScyllaConfig; defaults to ScyllaConfig.from_env()
         """
-        self.contact_points = contact_points or ["127.0.0.1"]
-        self.port = port
-        self.keyspace = keyspace
+        from featurama.config import ScyllaConfig
+
+        cfg = config or ScyllaConfig.from_env()
+
+        self.contact_points = contact_points or cfg.contact_points
+        self.port = port if port is not None else cfg.port
+        self.keyspace = keyspace or cfg.keyspace
+        self.username = username if username is not None else cfg.username
+        self.password = password if password is not None else cfg.password
+        self.local_dc = local_dc if local_dc is not None else cfg.local_dc
+        self.replication_factor = (
+            replication_factor if replication_factor is not None
+            else cfg.replication_factor
+        )
+        self.ssl = ssl if ssl is not None else cfg.ssl
         self.cluster = None
         self.session = None
 
@@ -46,15 +75,36 @@ class ScyllaClient:
 
         logger.info(f"Connecting to ScyllaDB at {self.contact_points}:{self.port}")
 
+        # Pin routing to the local DC when known, so requests stay in-region
+        dc_policy = (
+            DCAwareRoundRobinPolicy(local_dc=self.local_dc)
+            if self.local_dc else DCAwareRoundRobinPolicy()
+        )
+
         # Create execution profile for better performance
         profile = ExecutionProfile(
-            load_balancing_policy=TokenAwarePolicy(DCAwareRoundRobinPolicy()),
+            load_balancing_policy=TokenAwarePolicy(dc_policy),
             row_factory=dict_factory
         )
+
+        auth_provider = None
+        if self.username:
+            auth_provider = PlainTextAuthProvider(
+                username=self.username,
+                password=self.password
+            )
+
+        ssl_context = None
+        if self.ssl:
+            import ssl as ssl_module
+
+            ssl_context = ssl_module.create_default_context()
 
         self.cluster = Cluster(
             contact_points=self.contact_points,
             port=self.port,
+            auth_provider=auth_provider,
+            ssl_context=ssl_context,
             execution_profiles={EXEC_PROFILE_DEFAULT: profile},
             protocol_version=4
         )
@@ -128,7 +178,11 @@ class ScyllaClient:
         """Create keyspace and tables."""
         logger.info("Initializing Featurama schema...")
 
-        statements = get_schema_statements()
+        statements = get_schema_statements(
+            keyspace=self.keyspace,
+            replication_factor=self.replication_factor,
+            local_dc=self.local_dc
+        )
         for statement in statements:
             logger.info(f"Executing: {statement[:100]}...")
             self.execute(statement)
