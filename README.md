@@ -85,6 +85,47 @@ python examples/05_train_model.py
 python examples/06_inference.py
 ```
 
+## ☁️ Running Against Scylla Cloud
+
+Connection settings come from the environment (or a `.env` file), so the same
+code runs against local Docker or a managed cluster with no code changes.
+
+```bash
+cp .env.example .env   # then fill in your cluster details
+```
+
+```bash
+SCYLLA_CONTACT_POINTS=node-0.<cluster>.clusters.scylla.cloud,node-1.<cluster>.clusters.scylla.cloud,node-2.<cluster>.clusters.scylla.cloud
+SCYLLA_USERNAME=scylla
+SCYLLA_PASSWORD=<password>
+SCYLLA_LOCAL_DC=AWS_US_EAST_1
+SCYLLA_REPLICATION_FACTOR=3
+```
+
+With `SCYLLA_LOCAL_DC` set, the keyspace is created with
+`NetworkTopologyStrategy` and requests are pinned to that datacenter via
+`TokenAwarePolicy(DCAwareRoundRobinPolicy(local_dc=...))`. Left unset, you get
+`SimpleStrategy` and the local single-node defaults.
+
+### Running from a remote loader host
+
+Scylla Cloud clusters are reachable over VPC peering, so run the pipeline from
+a host inside the peered VPC rather than from your laptop:
+
+```bash
+rsync -az --exclude '.git' --exclude '.env' ./ ubuntu@<loader-ip>:~/featurama/
+ssh ubuntu@<loader-ip> "python3 -m venv ~/venv && ~/venv/bin/pip install -r ~/featurama/requirements.txt && ~/venv/bin/pip install -e ~/featurama"
+```
+
+Write the `.env` on the loader (keep it out of version control), then run the
+examples there. To reach the inference server from your laptop, forward the
+port over SSH:
+
+```bash
+ssh -N -L 8000:localhost:8000 ubuntu@<loader-ip>
+# API docs: http://localhost:8000/docs
+```
+
 ## 📊 Feature Store Capabilities
 
 ### Feature Registration

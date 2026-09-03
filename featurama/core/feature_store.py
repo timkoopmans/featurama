@@ -32,19 +32,30 @@ class FeatureStore:
     def __init__(
         self,
         contact_points: List[str] = None,
-        port: int = 9042,
-        keyspace: str = KEYSPACE_NAME
+        port: int = None,
+        keyspace: str = None,
+        **client_kwargs
     ):
         """
         Initialize Feature Store.
+
+        Args left as None fall back to the environment config
+        (see featurama.config), so pointing at Scylla Cloud is a .env change.
 
         Args:
             contact_points: ScyllaDB node addresses
             port: CQL port
             keyspace: Keyspace name
+            **client_kwargs: Passed through to ScyllaClient (username,
+                password, local_dc, replication_factor, ssl, config)
         """
-        self.client = ScyllaClient(contact_points, port, keyspace)
-        self.keyspace = keyspace
+        self.client = ScyllaClient(
+            contact_points=contact_points,
+            port=port,
+            keyspace=keyspace,
+            **client_kwargs
+        )
+        self.keyspace = self.client.keyspace
         self._connected = False
 
     def connect(self):
@@ -168,7 +179,13 @@ class FeatureStore:
         self.connect()
 
         if 'timestamp' not in features_df.columns:
-            features_df['timestamp'] = datetime.now()
+            features_df = features_df.assign(timestamp=datetime.now())
+        else:
+            # A CSV round-trip turns timestamps into strings, and the prepared
+            # statement binds them without coercion - normalise to datetimes
+            features_df = features_df.assign(
+                timestamp=pd.to_datetime(features_df['timestamp'])
+            )
 
         logger.info(f"Writing {len(features_df)} feature values...")
 
@@ -206,12 +223,12 @@ class FeatureStore:
             value_int = None
             value_bool = None
 
-            if isinstance(value, bool):
-                value_bool = value
-            elif isinstance(value, int):
-                value_int = value
-            elif isinstance(value, float):
-                value_double = value
+            if isinstance(value, (bool, np.bool_)):
+                value_bool = bool(value)
+            elif isinstance(value, (int, np.integer)):
+                value_int = int(value)
+            elif isinstance(value, (float, np.floating)):
+                value_double = float(value)
             elif isinstance(value, str):
                 value_text = value
             else:
